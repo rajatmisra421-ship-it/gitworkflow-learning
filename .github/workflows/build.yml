@@ -34,4 +34,4 @@ jobs:
 
         # Step 5: Run tests
         - name: Run tests
-          run: npm test
+          run: npm test --watch=false --browsers=ChromeHeadlessCI
