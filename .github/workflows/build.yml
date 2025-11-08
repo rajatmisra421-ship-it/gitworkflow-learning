@@ -1,37 +1,170 @@
 # Name of the workflow (appears in GitHub UI)
-name: Basic Build Workflow
+name: Angular CI Pipeline
 
 # When should this workflow run
 on:
-    push:                       # Runs when code is pushed
-        branches: [main]        # Only on main branch
-    pull_request:               # Runs when PR is created
-        branches: [main]
+  push:  # Runs when code is pushed
+    branches: [main, development] # Only on main branch or development branch
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+  pull_request: # Runs when PR is created
+    branches: [main]
+  workflow_dispatch:
+
+# Environment variables for all jobs
+env:
+  NODE_VERSION: "20"
 
 # What should happen?
 jobs:
-    build:                      # Job name
-        runs-on: ubuntu-latest  # Which operating system to use
+  # JOB 1: Install & Cache Dependencies
+  install:
+    name: Install Dependencies
+    runs-on: ubuntu-latest
 
-        steps:
-        # Step 1: Get the code
-        - name: Checkout code
-          uses: actions/checkout@v4
+    steps:
+      # Step 1: Get the code
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-        # Step 2: Set up programming environment (example: Node.js)
-        - name: Setup Node.js
-          uses: actions/setup-node@v4
-          with:
-            node-version: '20'
+      # Step 2: Set up programming environment (example: Node.js)
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "npm" # Automatically caches npm dependencies
 
-        # Step 3: Install dependencies
-        - name: Install dependencies
-          run: npm install
+      - name: Check cache
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: node_modules
+          key: node-modules-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: |
+            node-modules-
 
-        # Step 4: Run build
-        - name: Build project
-          run: npm run build
+      # Step 3: Install dependencies
+      - name: Install dependencies
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: npm ci
 
-        # Step 5: Run tests
-        - name: Run tests
-          run: npm test
+      - name: Verify installation
+        run: |
+          echo "Node version: $(node --version)"
+          echo "NPM version: $(npm --version)"
+          echo "Angular CLI version:"
+          npx ng version
+
+  # JOB 2: Lint (runs after install)
+  lint:
+    name: Run Linter
+    needs: install
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actiions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Restore cache
+        uses: actions/cache@v4
+        with:
+          path: node_modules
+          key: node-modules-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: |
+            node-modules-
+
+      - name: Run ESLint
+        run: npm run lint
+        continue-on-error: false # Stop workflow if linting fails
+
+  # JOB 3: Test (runs after install)
+  test:
+    name: Run Tests
+    needs: install
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Restore cache
+        uses: actions/cache@v4
+        with:
+          path: node_modules
+          key: node-modules-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: |
+            node-modules-
+
+      - name: Run unit tests
+        run: npm run test -- --watch=false --browsers=ChromeHeadless --code-coverage
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage/
+          retention-days: 30
+
+      - name: Display coverage summary
+        run: |
+          if [ -f coverage/lcov.info ]; then
+            echo "✅ Coverage report generated"
+          fi
+
+  # JOB 4: Build (runs after lint & test pass)
+  build:
+    name: Build Application
+    needs: [lint, test]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Restore cache
+        uses: actions/cache@v4
+        with:
+          path: node_modules
+          key: node-modules-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: |
+            node-modules-
+
+      - name: Build Angular app (Production)
+        run: npm run build -- --configuration production
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: angular-build
+          path: dist/
+          retention-days: 7
+
+      - name: List build output
+        run: |
+          echo " Build completed! Files generated:"
+          ls -lh dist/
+          du -sh dist/
+
+      - name: Build Summary
+        run: |
+          echo "### 🎉 Build Successful!" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Branch:** ${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Commit:** ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Node Version:** ${{ env.NODE_VERSION }}" >> $GITHUB_STEP_SUMMARY
