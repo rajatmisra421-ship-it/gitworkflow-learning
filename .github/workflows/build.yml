@@ -129,7 +129,6 @@ jobs:
 
       - name: Run unit tests
         run: npm run test -- --watch=false --browsers=ChromeHeadless --code-coverage
-        continue-on-error: true # Stop workflow if tests fail
 
       - name: Upload coverage report
         if: matrix.node-version == 20 && matrix.os == 'ubuntu-latest'
