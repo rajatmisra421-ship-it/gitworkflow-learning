@@ -1,5 +1,5 @@
 # Name of the workflow (appears in GitHub UI)
-name: Angular CI Pipeline
+name: Angular Production Pipeline
 
 # When should this workflow run
 on:
@@ -10,11 +10,26 @@ on:
       - "docs/**"
   pull_request: # Runs when PR is created
     branches: [main]
+  release:
+    types: [published]
   workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Deployment environment'
+        required: true
+        type: choice
+        options:
+          - staging
+          - production
 
 # Environment variables for all jobs
 env:
   NODE_VERSION: "20"
+
+# Cancel old runs when new ones start
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 # What should happen?
 jobs:
@@ -35,7 +50,7 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           cache: "npm" # Automatically caches npm dependencies
 
-      - name: Check cache
+      - name: Cache node_modules
         id: cache
         uses: actions/cache@v4
         with:
@@ -58,7 +73,7 @@ jobs:
 
   # JOB 2: Lint (runs after install)
   lint:
-    name: Run Linter
+    name: Lint Code
     needs: install
     runs-on: ubuntu-latest
 
@@ -83,11 +98,17 @@ jobs:
         run: npm run lint
         continue-on-error: false # Stop workflow if linting fails
 
-  # JOB 3: Test (runs after install)
+  # JOB 3: Test (Matrix Strategy)
   test:
-    name: Run Tests
+    name: Test (Node ${{ matrix.node-version }}, ${{ matrix.os }})
     needs: install
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: [18, 20, 22]
+        os: [ubuntu-latest, windows-latest]
 
     steps:
       - name: Checkout code
@@ -110,6 +131,7 @@ jobs:
         run: npm run test -- --watch=false --browsers=ChromeHeadless --code-coverage
 
       - name: Upload coverage report
+        if: matrix.node-version == 20 && matrix.os == 'ubuntu-latest'
         uses: actions/upload-artifact@v4
         with:
           name: coverage-report
@@ -117,6 +139,7 @@ jobs:
           retention-days: 30
 
       - name: Display coverage summary
+        if: matrix.node-version == 20 && matrix.os == 'ubuntu-latest'
         run: |
           if [ -f coverage/lcov.info ]; then
             echo "✅ Coverage report generated"
@@ -127,6 +150,11 @@ jobs:
     name: Build Application
     needs: [lint, test]
     runs-on: ubuntu-latest
+
+    # Expose outputs to other jobs
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      artifact-name: ${{ steps.version.outputs.artifact-name }}
 
     steps:
       - name: Checkout code
@@ -145,26 +173,122 @@ jobs:
           restore-keys: |
             node-modules-
 
+      - name: Generate version number
+        id: version
+        run: |
+          if [[ $GITHUB_REF == refs/tags/* ]]; then
+            VERSION=${GITHUB_REF#refs/tags/}
+          else
+            VERSION=$(date +%Y%m%d-%H%M)-${GITHUB_SHA::8}
+          fi
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "artifact-name=angular-build-$VERSION" >> $GITHUB_OUTPUT
+          echo "Generated version: $VERSION"
+
       - name: Build Angular app (Production)
         run: npm run build -- --configuration production
+
+      - name: Display build info
+        run: |
+          echo "### 🎉 Build Complete!" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Version:** ${{ steps.version.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Branch:** ${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Commit:** ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Size:** $(du -sh dist/ | cut -f1)" >> $GITHUB_STEP_SUMMARY
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: angular-build
+          name: ${{ steps.version.outputs.artifact-name }}
           path: dist/
-          retention-days: 7
+          retention-days: 90
 
-      - name: List build output
-        run: |
-          echo " Build completed! Files generated:"
-          ls -lh dist/
-          du -sh dist/
+  # JOB 5: Deploy to Staging
+  deploy-staging:
+    name: Deploy to Staging
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/development'
 
-      - name: Build Summary
-        run: |
-          echo "### 🎉 Build Successful!" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "- **Branch:** ${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Commit:** ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Node Version:** ${{ env.NODE_VERSION }}" >> $GITHUB_STEP_SUMMARY
+    environment:
+      name: staging
+      url: https://staging.gitworkflow-learning.practice.com
+
+    steps:
+    - name: Download build artifacts
+      uses: actions/download-artifact@v4
+      with:
+        name: ${{ needs.build.outputs.artifact-name }}
+        path: dist/
+
+    - name: Display deployment info
+      run: |
+        echo "🚀 Deploying to staging..."
+        # Add your deployment commands here:
+        # - rsync, scp, or cloud CLI commands
+        # - Firebase: firebase deploy --only hosting:staging
+        # - AWS: aws s3 sync dist/ s3://staging-bucket/
+        # - GitHub Pages: Use actions/deploy-pages
+
+    - name: Run smoke tests
+      run: |
+        echo "Running smoke tests..."
+        # curl -f https://staging.gitworkflow-learning.practice.com/ || exit 1
+
+  # JOB 6: Deploy to Production (With Approval)
+  deploy-production:
+    name: 🌟 Deploy to Production
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')
+
+    environment:
+      name: production
+      url: https://www.gitworkflow-learning.practice.com
+
+    steps:
+    - name: Download build artifacts
+      uses: actions/download-artifact@v4
+      with:
+        name: ${{ needs.build.outputs.artifact-name }}
+        path: dist/
+
+    - name: Display deployment info
+      run: |
+        echo "🌟 PRODUCTION DEPLOYMENT"
+        echo "Version: ${{ needs.build.outputs.version }}"
+        echo "Triggered by: ${{ github.actor}}"
+        ls -lh dist/
+
+    - name: Create deployment record
+      run: |
+        echo "### 🌟 Production Deployment" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "- **Version:** ${{ needs.build.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Time:** $(date -u)" >> $GITHUB_STEP_SUMMARY
+        echo "- **By:** ${{ github.actor }}" >> $GITHUB_STEP_SUMMARY
+      
+  # JOB 7: Notification (runs always)
+  notify:
+    name: 📢 Send Notification
+    needs: [build, deploy-staging, deploy-production]
+    runs-on: ubuntu-latest
+    if: always()  # Run even if previous jobs fail
+
+    steps:
+    - name: Check workflow status
+      run: |
+        if [[ "${{ needs.build.result }}" == "failure" ]]; then
+          echo "status=❌ Failed" >> $GITHUB_ENV
+          echo "color=danger" >> $GITHUB_ENV
+        else
+          echo "status=✅ Success" >> $GITHUB_ENV
+          echo "color=good" >> $GITHUB_ENV
+        fi
+
+    - name: Send notification
+      run: |
+        echo "Workflow completed: $status"
+        echo "Would send Slack/Email notification here"
+        # Example: curl -X POST $SLACK_WEBHOOK -d "..."
